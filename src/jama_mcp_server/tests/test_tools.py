@@ -2,10 +2,14 @@ import pytest
 from unittest.mock import MagicMock
 
 # Import the tool functions we want to test
-from jama_mcp.server import (
+from jama_mcp_server.attachments import AttachmentFile
+from jama_mcp_server.server import (
     get_jama_projects,
     get_jama_item,
-    get_jama_project_items
+    get_jama_project_items,
+    get_jama_attachment,
+    get_jama_attachment_content,
+    get_jama_item_attachments,
 )
 
 # --- Test Fixtures ---
@@ -154,3 +158,139 @@ async def test_get_jama_project_items_error(mock_context, mock_jama_client):
 
     # Assert
     mock_jama_client.get_items.assert_called_once_with(project_id=project_id_to_test)
+
+
+# --- Tool Tests for get_jama_item_attachments ---
+
+@pytest.mark.asyncio
+async def test_get_jama_item_attachments_success(mock_context, mock_jama_client):
+    """Test get_jama_item_attachments resolves the REST attachment id for an item."""
+    from jama_mcp_server.attachments import AttachmentInfo
+
+    item_id_to_test = "140309"
+    mock_jama_client.list_item_attachments.return_value = [
+        AttachmentInfo(id=315628, file_name="diagram.png", mime_type="image/png", file_size=151783)
+    ]
+
+    result = await get_jama_item_attachments(item_id=item_id_to_test, ctx=mock_context)
+
+    assert result == [{"id": 315628, "file_name": "diagram.png", "mime_type": "image/png", "file_size": 151783}]
+    mock_jama_client.list_item_attachments.assert_called_once_with(item_id_to_test)
+
+
+# --- Tool Tests for get_jama_attachment ---
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_success(mock_context, mock_jama_client):
+    """Test get_jama_attachment returns metadata from mock client."""
+    attachment_id_to_test = "701"
+    mock_attachment_data = {"id": 701, "fields": {"name": "diagram.png"}}
+    mock_jama_client.get_attachment.return_value = mock_attachment_data
+
+    result = await get_jama_attachment(attachment_id=attachment_id_to_test, ctx=mock_context)
+
+    assert result == mock_attachment_data
+    mock_jama_client.get_attachment.assert_called_once_with(attachment_id_to_test)
+
+
+# --- Tool Tests for get_jama_attachment_content ---
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_image_returns_image_content(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content returns MCP ImageContent for an image attachment."""
+    from mcp.types import ImageContent
+
+    attachment_id_to_test = "701"
+    mock_jama_client.get_attachment_file.return_value = AttachmentFile(
+        content=b"\x89PNG\r\n\x1a\nfakepngbytes",
+        content_type="image/png",
+        filename="diagram.png",
+    )
+
+    result = await get_jama_attachment_content(attachment_id=attachment_id_to_test, ctx=mock_context)
+
+    image_content = result.to_image_content()
+    assert isinstance(image_content, ImageContent)
+    assert image_content.mimeType == "image/png"
+    mock_jama_client.get_attachment_file.assert_called_once_with(attachment_id_to_test)
+
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_non_image_returns_embedded_resource(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content returns an EmbeddedResource for non-image attachments."""
+    from mcp.types import BlobResourceContents, EmbeddedResource
+
+    attachment_id_to_test = "702"
+    mock_jama_client.get_attachment_file.return_value = AttachmentFile(
+        content=b"%PDF-1.4 fake pdf bytes",
+        content_type="application/pdf",
+        filename="spec.pdf",
+    )
+
+    result = await get_jama_attachment_content(attachment_id=attachment_id_to_test, ctx=mock_context)
+
+    assert isinstance(result, EmbeddedResource)
+    assert isinstance(result.resource, BlobResourceContents)
+    assert result.resource.mimeType == "application/pdf"
+    mock_jama_client.get_attachment_file.assert_called_once_with(attachment_id_to_test)
+
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_not_found_propagates(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content propagates a not-found error from the client."""
+    attachment_id_to_test = "999"
+    mock_jama_client.get_attachment_file.side_effect = ValueError("Attachment not found")
+
+    with pytest.raises(ValueError, match="Attachment not found"):
+        await get_jama_attachment_content(attachment_id=attachment_id_to_test, ctx=mock_context)
+
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_resolves_via_item_id_and_file_name(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content resolves the id itself when given item_id + file_name."""
+    from jama_mcp_server.attachments import AttachmentInfo
+
+    mock_jama_client.list_item_attachments.return_value = [
+        AttachmentInfo(id=315628, file_name="diagram.png", mime_type="image/png", file_size=151783)
+    ]
+    mock_jama_client.get_attachment_file.return_value = AttachmentFile(
+        content=b"\x89PNG\r\n\x1a\nfakepngbytes",
+        content_type="image/png",
+        filename="diagram.png",
+    )
+
+    result = await get_jama_attachment_content(item_id="140309", file_name="diagram.png", ctx=mock_context)
+
+    result.to_image_content()  # doesn't raise
+    mock_jama_client.list_item_attachments.assert_called_once_with("140309")
+    mock_jama_client.get_attachment_file.assert_called_once_with("315628")
+
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_requires_id_or_item_and_filename(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content rejects a call with none of its identifying args."""
+    with pytest.raises(ValueError, match="Provide either attachment_id"):
+        await get_jama_attachment_content(ctx=mock_context)
+
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_file_name_not_found(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content raises when no attachment matches file_name."""
+    mock_jama_client.list_item_attachments.return_value = []
+
+    with pytest.raises(Exception, match="No attachment named"):
+        await get_jama_attachment_content(item_id="140309", file_name="missing.png", ctx=mock_context)
+
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_file_name_ambiguous(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content raises when file_name matches more than one attachment."""
+    from jama_mcp_server.attachments import AttachmentInfo
+
+    mock_jama_client.list_item_attachments.return_value = [
+        AttachmentInfo(id=175819, file_name="Protective state.txt", mime_type="text/plain", file_size=1321),
+        AttachmentInfo(id=211114, file_name="Protective state.txt", mime_type="text/plain", file_size=1321),
+    ]
+
+    with pytest.raises(Exception, match="2 attachments named"):
+        await get_jama_attachment_content(item_id="103", file_name="Protective state.txt", ctx=mock_context)

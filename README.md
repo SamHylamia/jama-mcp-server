@@ -191,6 +191,8 @@ Configure your MCP client (like Cline, RooCode, Claude Desktop) to launch this s
 
 This server provides various read-only tools. See your MCP client interface for the full list after connecting. Examples include `get_jama_projects`, `get_jama_item`, `get_jama_relationships`, etc.
 
+To retrieve an attachment referenced in an item's rich-text fields (e.g. an `<img>` tag pointing at a Jama attachment URL like `https://<host>/attachment/21627/diagram.png`), pass `get_jama_attachment_content` the item's ID and the file name from that URL (`get_jama_attachment` returns just the attachment's metadata, and `get_jama_item_attachments` lists all of an item's attachments if you need to disambiguate or browse). **Note:** the numeric ID embedded in that URL is *not* the REST API attachment ID (it's served by a separate, browser-session-authenticated endpoint with its own ID space), so it can't be used directly; the file name is what actually identifies the attachment. Image attachments come back as inline images; other file types come back as an embedded resource with base64-encoded content.
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

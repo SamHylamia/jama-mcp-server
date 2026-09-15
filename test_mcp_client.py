@@ -104,6 +104,15 @@ async def main():
                 # Example: Get Test Runs for Cycle 501
                 await run_test("get_test_runs_501", "get_jama_test_runs", arguments={"test_cycle_id": "501"})
 
+                # Example: Get Item Attachments (resolves item 123's attachment to ID 701)
+                await run_test("get_item_attachments_123", "get_jama_item_attachments", arguments={"item_id": "123"})
+
+                # Example: Get Attachment Metadata (ID 701)
+                await run_test("get_attachment_701", "get_jama_attachment", arguments={"attachment_id": "701"})
+
+                # Example: Get Attachment Content (ID 701, mock PNG)
+                await run_test("get_attachment_content_701", "get_jama_attachment_content", arguments={"attachment_id": "701"})
+
 
                 # --- Print Summary ---
                 print("\n--- Test Summary ---")

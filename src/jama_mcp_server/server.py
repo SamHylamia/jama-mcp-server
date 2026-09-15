@@ -1,9 +1,14 @@
+import base64
 import os
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 import logging
 
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import FastMCP, Context, Image
+from mcp.types import BlobResourceContents, EmbeddedResource
+from pydantic import AnyUrl
+
+from .attachments import get_attachment_file, list_item_attachments, resolve_attachment_id
 from .auth import get_jama_credentials, CredentialsError
 
 # Configure basic logging FIRST
@@ -278,6 +283,125 @@ async def get_jama_item_downstream_related(item_id: str, ctx: Context) -> list[d
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
     items = jama_client.get_items_downstream_related(item_id=item_id)
     return items if items else []
+
+@mcp.tool()
+async def get_jama_item_attachments(item_id: str, ctx: Context) -> list[dict]:
+    """
+    Lists the attachments associated with a Jama item: their REST API IDs, file
+    names, MIME types, and sizes. Useful for browsing what's attached to an item,
+    or to disambiguate when get_jama_attachment_content's item_id/file_name lookup
+    fails because more than one attachment shares that file name.
+
+    Note: the numeric ID embedded in an attachment's web UI URL (e.g. the `21627`
+    in `https://<host>/attachment/21627/diagram.png`) is a different ID space from
+    the REST attachment ID returned here - that URL is served by a separate,
+    browser-session-authenticated endpoint. It's the file name from that URL,
+    together with the item's ID, that identifies the attachment for this tool
+    and for get_jama_attachment_content.
+
+    Args:
+        item_id: The ID (as a string) of the Jama item.
+
+    Returns:
+        A list of dictionaries, one per attachment, each with `id`, `file_name`,
+        `mime_type`, and `file_size`.
+
+    Raises:
+        APIException: If the item is not found or an error occurs.
+    """
+    logger.info(f"Executing get_jama_item_attachments tool for item_id: {item_id}")
+    jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    attachments = list_item_attachments(jama_client, item_id)
+    return [a._asdict() for a in attachments]
+
+@mcp.tool()
+async def get_jama_attachment(attachment_id: str, ctx: Context) -> dict:
+    """
+    Retrieves metadata for a specific Jama attachment by its ID (name, description,
+    etc.). To retrieve the attachment's actual file content (e.g. an image embedded
+    in an item's rich-text description), use get_jama_attachment_content instead.
+
+    Args:
+        attachment_id: The ID (as a string) of the Jama attachment, as returned by
+            get_jama_item_attachments (its `id` field).
+
+    Returns:
+        A dictionary representing the attachment.
+
+    Raises:
+        APIException: If the attachment is not found or an error occurs.
+    """
+    logger.info(f"Executing get_jama_attachment tool for attachment_id: {attachment_id}")
+    jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    attachment = jama_client.get_attachment(attachment_id)
+    if not attachment and MOCK_MODE:
+        raise ValueError(f"Mock Attachment with ID {attachment_id} not found.")
+    return attachment
+
+@mcp.tool()
+async def get_jama_attachment_content(
+    ctx: Context,
+    attachment_id: str | None = None,
+    item_id: str | None = None,
+    file_name: str | None = None,
+):
+    """
+    Retrieves the file content of a Jama attachment, e.g. an image embedded via an
+    <img> tag in an item's rich-text description field.
+
+    Identify the attachment with EITHER:
+    - attachment_id: its REST API ID, as returned by get_jama_item_attachments; or
+    - item_id and file_name together: the ID of the item the attachment belongs to
+      plus its file name (e.g. the text after the last `/` in an <img> src). This
+      resolves the ID internally (equivalent to calling get_jama_item_attachments
+      and matching by file name), saving a separate call in the common case where
+      you already know both from having just read the item. It fails if the item
+      has more than one attachment with that file name - call
+      get_jama_item_attachments yourself and pass a specific attachment_id in
+      that case.
+
+    Args:
+        attachment_id: The REST API ID of the attachment. Optional if item_id and
+            file_name are given instead.
+        item_id: The ID of the item the attachment belongs to. Used with file_name.
+        file_name: The attachment's file name. Used with item_id.
+
+    Returns:
+        An inline image for image attachments (e.g. PNG, JPEG). For any other
+        attachment type, an embedded resource containing the base64-encoded file
+        content and its MIME type.
+
+    Raises:
+        ValueError: If neither attachment_id nor (item_id and file_name) are given.
+        ResourceNotFoundException: If the attachment or its file is not found.
+        APIException: If an error occurs during the Jama API call, or file_name
+            matches more than one attachment on the item.
+    """
+    logger.info(
+        f"Executing get_jama_attachment_content tool for attachment_id={attachment_id}, "
+        f"item_id={item_id}, file_name={file_name}"
+    )
+    jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+
+    if attachment_id is None:
+        if not item_id or not file_name:
+            raise ValueError("Provide either attachment_id, or both item_id and file_name.")
+        attachment_id = resolve_attachment_id(jama_client, item_id, file_name)
+
+    attachment_file = get_attachment_file(jama_client, attachment_id)
+
+    if attachment_file.content_type.startswith("image/"):
+        image_format = attachment_file.content_type.split("/", 1)[1].split(";")[0]
+        return Image(data=attachment_file.content, format=image_format)
+
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri=AnyUrl(f"jama://attachments/{attachment_id}/file"),
+            mimeType=attachment_file.content_type,
+            blob=base64.b64encode(attachment_file.content).decode("ascii"),
+        ),
+    )
 
 @mcp.tool()
 async def get_jama_item_types(ctx: Context) -> list[dict]:

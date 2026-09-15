@@ -1,6 +1,15 @@
 import logging
 
+from .attachments import AttachmentFile, AttachmentInfo
+
 logger = logging.getLogger(__name__)
+
+# A minimal valid 1x1 red PNG, used as mock attachment file content.
+_MOCK_PNG_BYTES = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
+    "0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae"
+    "426082"
+)
 
 class MockJamaClient:
     """
@@ -155,6 +164,24 @@ class MockJamaClient:
         if test_cycle_id == "501":
             return [{"id": 601, "name": "Run 1", "status": "PASSED"},
                     {"id": 602, "name": "Run 2", "status": "FAILED"}]
+        return []
+
+    def get_attachment(self, attachment_id: str):
+        logger.info(f"MOCK: get_attachment(attachment_id='{attachment_id}') called")
+        if attachment_id == "701":
+            return {"id": 701, "fields": {"name": "BCU_level_block.drawio.png", "description": "Mock diagram attachment"}}
+        return None
+
+    def get_attachment_file(self, attachment_id: str) -> AttachmentFile:
+        logger.info(f"MOCK: get_attachment_file(attachment_id='{attachment_id}') called")
+        if attachment_id == "701":
+            return AttachmentFile(content=_MOCK_PNG_BYTES, content_type="image/png", filename="BCU_level_block.drawio.png")
+        raise ValueError(f"Mock Attachment file for ID {attachment_id} not found.")
+
+    def list_item_attachments(self, item_id: str) -> list[AttachmentInfo]:
+        logger.info(f"MOCK: list_item_attachments(item_id='{item_id}') called")
+        if item_id == "123":
+            return [AttachmentInfo(id=701, file_name="BCU_level_block.drawio.png", mime_type="image/png", file_size=len(_MOCK_PNG_BYTES))]
         return []
 
     # Add mock methods for other functions as needed
