@@ -101,13 +101,7 @@ mcp = FastMCP(
 @mcp.tool()
 async def get_jama_projects(ctx: Context) -> list[dict]:
     """
-    Retrieves a list of projects from Jama Connect.
-
-    Returns:
-        A list of dictionaries representing projects.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists all Jama projects.
     """
     logger.info("Executing get_jama_projects tool")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -123,29 +117,20 @@ MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
 @mcp.tool()
 async def get_jama_item(item_id: str, ctx: Context, include_images: bool = False) -> dict:
     """
-    Retrieves details for a specific item from Jama Connect by its ID.
+    Gets a Jama item by its numeric ID (not its documentKey like "ABC-REQ-12").
 
-    The returned item has an extra `embedded_files` list: every file its rich-text
-    fields reference (images pasted into or attached to the description, linked
-    files), each with `field`, `url`, `file_name`, `kind` ("image" or "link") and
-    `alt`. Pass those URLs to get_jama_attachment_content to fetch them, all in
-    one call. Pasted images are not attachments of the item, so
-    get_jama_item_attachments doesn't list them; use `embedded_files` instead.
+    Rich-text fields (e.g. `description`) are HTML; links like
+    `perspective.req?docId=<n>` point to item <n>. Custom field keys end in
+    `$<itemTypeId>`; pick-list fields hold option IDs (resolve with
+    get_jama_pick_list_option).
+
+    The result adds `embedded_files`: files referenced from the rich text, each with
+    `field`, `url`, `file_name`, `kind` ("image" or "link") and `alt`. Fetch them with
+    get_jama_attachment_content(urls=[...]).
 
     Args:
-        item_id: The ID (as a string) of the Jama item to retrieve.
-        include_images: If true, also fetch the item's embedded images and return
-            them inline after the item, saving a get_jama_attachment_content call.
-            Leave false unless you need to see the images: they use a lot of
-            context. At most 10 images of up to 5 MB each are inlined; any others
-            are noted and can be fetched with get_jama_attachment_content.
-
-    Returns:
-        A dictionary representing the item, followed by its images if
-        include_images is true.
-
-    Raises:
-        APIException: If the item is not found or an error occurs.
+        include_images: Also return the embedded images inline (max 10, 5 MB each).
+            Costly in context; only set when you need to see them.
     """
     logger.info(f"Executing get_jama_item tool for item_id: {item_id}, include_images: {include_images}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -181,16 +166,8 @@ async def get_jama_item(item_id: str, ctx: Context, include_images: bool = False
 @mcp.tool()
 async def get_jama_project_items(project_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves a list of items for a specific project from Jama Connect.
-
-    Args:
-        project_id: The ID (as a string) of the Jama project.
-
-    Returns:
-        A list of dictionaries representing items in the project.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists every item in a project. Can be very large; prefer get_jama_item_children
+    or get_jama_tagged_items to narrow down.
     """
     logger.info(f"Executing get_jama_project_items tool for project_id: {project_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -200,16 +177,7 @@ async def get_jama_project_items(project_id: str, ctx: Context) -> list[dict]:
 @mcp.tool()
 async def get_jama_item_children(item_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves child items for a specific Jama item.
-
-    Args:
-        item_id: The ID (as a string) of the parent Jama item.
-
-    Returns:
-        A list of dictionaries representing child items.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists an item's direct children in the project tree.
     """
     logger.info(f"Executing get_jama_item_children tool for parent_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -219,16 +187,8 @@ async def get_jama_item_children(item_id: str, ctx: Context) -> list[dict]:
 @mcp.tool()
 async def get_jama_relationships(project_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves all relationships within a specific Jama project.
-
-    Args:
-        project_id: The ID (as a string) of the Jama project.
-
-    Returns:
-        A list of dictionaries representing relationships.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists every relationship in a project. Can be very large; prefer the per-item
+    relationship tools.
     """
     logger.info(f"Executing get_jama_relationships tool for project_id: {project_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -238,16 +198,7 @@ async def get_jama_relationships(project_id: str, ctx: Context) -> list[dict]:
 @mcp.tool()
 async def get_jama_relationship(relationship_id: str, ctx: Context) -> dict:
     """
-    Retrieves details for a specific relationship by its ID.
-
-    Args:
-        relationship_id: The ID (as a string) of the relationship.
-
-    Returns:
-        A dictionary representing the relationship.
-
-    Raises:
-        APIException: If the relationship is not found or an error occurs.
+    Gets a relationship by ID: `fromItem`, `toItem`, `relationshipType`, `suspect`.
     """
     logger.info(f"Executing get_jama_relationship tool for relationship_id: {relationship_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -260,16 +211,8 @@ async def get_jama_relationship(relationship_id: str, ctx: Context) -> dict:
 @mcp.tool()
 async def get_jama_item_upstream_relationships(item_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves upstream relationships for a specific Jama item.
-
-    Args:
-        item_id: The ID (as a string) of the Jama item.
-
-    Returns:
-        A list of dictionaries representing upstream relationships.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists relationship records pointing into an item (`fromItem` is upstream). Use
+    get_jama_item_upstream_related to get the items themselves.
     """
     logger.info(f"Executing get_jama_item_upstream_relationships tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -279,16 +222,8 @@ async def get_jama_item_upstream_relationships(item_id: str, ctx: Context) -> li
 @mcp.tool()
 async def get_jama_item_downstream_relationships(item_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves downstream relationships for a specific Jama item.
-
-    Args:
-        item_id: The ID (as a string) of the Jama item.
-
-    Returns:
-        A list of dictionaries representing downstream relationships.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists relationship records going out from an item (`toItem` is downstream). Use
+    get_jama_item_downstream_related to get the items themselves.
     """
     logger.info(f"Executing get_jama_item_downstream_relationships tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -298,16 +233,7 @@ async def get_jama_item_downstream_relationships(item_id: str, ctx: Context) -> 
 @mcp.tool()
 async def get_jama_item_upstream_related(item_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves upstream related items for a specific Jama item.
-
-    Args:
-        item_id: The ID (as a string) of the Jama item.
-
-    Returns:
-        A list of dictionaries representing upstream related items.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists the items upstream of an item (e.g. the requirements it satisfies).
     """
     logger.info(f"Executing get_jama_item_upstream_related tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -317,16 +243,7 @@ async def get_jama_item_upstream_related(item_id: str, ctx: Context) -> list[dic
 @mcp.tool()
 async def get_jama_item_downstream_related(item_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves downstream related items for a specific Jama item.
-
-    Args:
-        item_id: The ID (as a string) of the Jama item.
-
-    Returns:
-        A list of dictionaries representing downstream related items.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists the items downstream of an item (e.g. those that satisfy or verify it).
     """
     logger.info(f"Executing get_jama_item_downstream_related tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -336,24 +253,10 @@ async def get_jama_item_downstream_related(item_id: str, ctx: Context) -> list[d
 @mcp.tool()
 async def get_jama_item_attachments(item_id: str, ctx: Context) -> list[dict]:
     """
-    Lists the attachments associated with a Jama item: their REST API IDs, file
-    names, MIME types, and sizes. Pass the IDs to get_jama_attachment_content's
-    attachment_ids to fetch the files.
-
-    Images pasted into an item's rich text are not attachments and are not listed
-    here. For files referenced from rich text, use the `embedded_files` URLs from
-    get_jama_item instead. The number in such a URL (e.g. the `21627` in
-    `https://<host>/attachment/21627/diagram.png`) is not a REST attachment ID.
-
-    Args:
-        item_id: The ID (as a string) of the Jama item.
-
-    Returns:
-        A list of dictionaries, one per attachment, each with `id`, `file_name`,
-        `mime_type`, and `file_size`.
-
-    Raises:
-        APIException: If the item is not found or an error occurs.
+    Lists files in an item's Attachments section: `id`, `file_name`, `mime_type`,
+    `file_size`. Fetch them with get_jama_attachment_content(attachment_ids=[...]).
+    Images pasted into rich text aren't listed here; see get_jama_item's
+    `embedded_files`.
     """
     logger.info(f"Executing get_jama_item_attachments tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -367,31 +270,15 @@ async def get_jama_attachment_content(
     attachment_ids: list[str] | None = None,
 ):
     """
-    Retrieves the file content of one or more Jama files in a single call, e.g. the
-    images in an item's rich-text description.
-
-    Identify the files with either or both of:
-    - urls: URLs of files referenced from an item's rich-text fields, as listed in
-      get_jama_item's `embedded_files` (or an <img src> / <a href> pointing at
-      `https://<host>/attachment/...`). This works for images pasted into rich text
-      as well as attachments referenced from it. Pass all the files you need at
-      once rather than calling this tool once per file.
-    - attachment_ids: REST API attachment IDs, as returned by
-      get_jama_item_attachments, for attachments not referenced from rich text.
-      The number in an `/attachment/<n>/...` URL is not an attachment ID.
+    Fetches the content of one or more Jama files in one call. Images come back
+    inline; other files as base64 embedded resources. A file that fails yields an
+    error line without failing the rest.
 
     Args:
-        urls: URLs of files referenced from rich text.
-        attachment_ids: REST API IDs of attachments.
-
-    Returns:
-        For each file, a text line naming it, followed by the file: an inline image
-        for image files (e.g. PNG, JPEG), otherwise an embedded resource containing
-        the base64-encoded content and its MIME type. A file that can't be fetched
-        gets a text line with the error instead, without failing the others.
-
-    Raises:
-        ValueError: If neither urls nor attachment_ids are given.
+        urls: URLs from get_jama_item's `embedded_files` (or any rich-text
+            `/attachment/...` src/href).
+        attachment_ids: IDs from get_jama_item_attachments. The number in an
+            `/attachment/<n>/` URL is not an attachment ID.
     """
     logger.info(f"Executing get_jama_attachment_content tool for urls={urls}, attachment_ids={attachment_ids}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -442,13 +329,7 @@ def _file_content(file: AttachmentFile, uri: str) -> list:
 @mcp.tool()
 async def get_jama_item_types(ctx: Context) -> list[dict]:
     """
-    Retrieves all item types from Jama Connect.
-
-    Returns:
-        A list of dictionaries representing item types.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists all item types (an item's `itemType` is one of these IDs).
     """
     logger.info("Executing get_jama_item_types tool")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -458,16 +339,7 @@ async def get_jama_item_types(ctx: Context) -> list[dict]:
 @mcp.tool()
 async def get_jama_item_type(item_type_id: str, ctx: Context) -> dict:
     """
-    Retrieves details for a specific item type by its ID.
-
-    Args:
-        item_type_id: The ID (as a string) of the item type.
-
-    Returns:
-        A dictionary representing the item type.
-
-    Raises:
-        APIException: If the item type is not found or an error occurs.
+    Gets an item type by ID, including its field definitions.
     """
     logger.info(f"Executing get_jama_item_type tool for item_type_id: {item_type_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -479,13 +351,7 @@ async def get_jama_item_type(item_type_id: str, ctx: Context) -> dict:
 @mcp.tool()
 async def get_jama_pick_lists(ctx: Context) -> list[dict]:
     """
-    Retrieves all pick lists from Jama Connect.
-
-    Returns:
-        A list of dictionaries representing pick lists.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists all pick lists.
     """
     logger.info("Executing get_jama_pick_lists tool")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -495,16 +361,7 @@ async def get_jama_pick_lists(ctx: Context) -> list[dict]:
 @mcp.tool()
 async def get_jama_pick_list(pick_list_id: str, ctx: Context) -> dict:
     """
-    Retrieves details for a specific pick list by its ID.
-
-    Args:
-        pick_list_id: The ID (as a string) of the pick list.
-
-    Returns:
-        A dictionary representing the pick list.
-
-    Raises:
-        APIException: If the pick list is not found or an error occurs.
+    Gets a pick list by ID.
     """
     logger.info(f"Executing get_jama_pick_list tool for pick_list_id: {pick_list_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -516,16 +373,7 @@ async def get_jama_pick_list(pick_list_id: str, ctx: Context) -> dict:
 @mcp.tool()
 async def get_jama_pick_list_options(pick_list_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves options for a specific pick list.
-
-    Args:
-        pick_list_id: The ID (as a string) of the pick list.
-
-    Returns:
-        A list of dictionaries representing pick list options.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists a pick list's options.
     """
     logger.info(f"Executing get_jama_pick_list_options tool for pick_list_id: {pick_list_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -535,16 +383,7 @@ async def get_jama_pick_list_options(pick_list_id: str, ctx: Context) -> list[di
 @mcp.tool()
 async def get_jama_pick_list_option(pick_list_option_id: str, ctx: Context) -> dict:
     """
-    Retrieves details for a specific pick list option by its ID.
-
-    Args:
-        pick_list_option_id: The ID (as a string) of the pick list option.
-
-    Returns:
-        A dictionary representing the pick list option.
-
-    Raises:
-        APIException: If the pick list option is not found or an error occurs.
+    Gets a pick list option by ID, e.g. to resolve an item's pick-list field value to its name.
     """
     logger.info(f"Executing get_jama_pick_list_option tool for pick_list_option_id: {pick_list_option_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -556,16 +395,7 @@ async def get_jama_pick_list_option(pick_list_option_id: str, ctx: Context) -> d
 @mcp.tool()
 async def get_jama_tags(project_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves all tags for a specific project.
-
-    Args:
-        project_id: The ID (as a string) of the Jama project.
-
-    Returns:
-        A list of dictionaries representing tags.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists a project's tags.
     """
     logger.info(f"Executing get_jama_tags tool for project_id: {project_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -575,16 +405,7 @@ async def get_jama_tags(project_id: str, ctx: Context) -> list[dict]:
 @mcp.tool()
 async def get_jama_tagged_items(tag_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves items associated with a specific tag.
-
-    Args:
-        tag_id: The ID (as a string) of the tag.
-
-    Returns:
-        A list of dictionaries representing items associated with the tag.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists the items that have a tag.
     """
     logger.info(f"Executing get_jama_tagged_items tool for tag_id: {tag_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -594,16 +415,7 @@ async def get_jama_tagged_items(tag_id: str, ctx: Context) -> list[dict]:
 @mcp.tool()
 async def get_jama_test_cycle(test_cycle_id: str, ctx: Context) -> dict:
     """
-    Retrieves details for a specific test cycle by its ID.
-
-    Args:
-        test_cycle_id: The ID (as a string) of the test cycle.
-
-    Returns:
-        A dictionary representing the test cycle.
-
-    Raises:
-        APIException: If the test cycle is not found or an error occurs.
+    Gets a test cycle by ID.
     """
     logger.info(f"Executing get_jama_test_cycle tool for test_cycle_id: {test_cycle_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -615,16 +427,7 @@ async def get_jama_test_cycle(test_cycle_id: str, ctx: Context) -> dict:
 @mcp.tool()
 async def get_jama_test_runs(test_cycle_id: str, ctx: Context) -> list[dict]:
     """
-    Retrieves test runs associated with a specific test cycle.
-
-    Args:
-        test_cycle_id: The ID (as a string) of the test cycle.
-
-    Returns:
-        A list of dictionaries representing test runs.
-
-    Raises:
-        APIException: If an error occurs during the Jama API call.
+    Lists a test cycle's test runs.
     """
     logger.info(f"Executing get_jama_test_runs tool for test_cycle_id: {test_cycle_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
@@ -636,15 +439,7 @@ async def get_jama_test_runs(test_cycle_id: str, ctx: Context) -> list[dict]:
 @mcp.tool()
 async def test_jama_connection(ctx: Context) -> dict:
     """
-    Tests the connection and authentication to the Jama Connect API.
-    Attempts to fetch available API endpoints as a lightweight check.
-
-    Returns:
-        A dictionary containing the result of the get_available_endpoints call.
-
-    Raises:
-        APIException: If the connection test fails.
-        ValueError: If the JamaClient is not found in the context.
+    Checks that the server can reach and authenticate to Jama.
     """
     logger.info("Executing test_jama_connection tool")
     jama_client: JamaClient = ctx.request_context.lifespan_context.get("jama_client")
