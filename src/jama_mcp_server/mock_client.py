@@ -5,6 +5,8 @@ from .attachments import AttachmentFile, AttachmentInfo
 logger = logging.getLogger(__name__)
 
 # A minimal valid 1x1 red PNG, used as mock attachment file content.
+_MOCK_EMBEDDED_IMAGE_URL = "https://mock.jama.local/attachment/22129/image-pasted.png"
+
 _MOCK_PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
     "0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae"
@@ -25,7 +27,7 @@ class MockJamaClient:
         logger.info(f"MOCK: get_item(item_id='{item_id}') called")
         # Compare as strings or convert if necessary for logic
         if item_id == "123":
-            return {"id": 123, "documentKey": "MOCK-1", "fields": {"name": "Mock Item 123", "description": "A sample item."}}
+            return {"id": 123, "documentKey": "MOCK-1", "fields": {"name": "Mock Item 123", "description": f'<p>A sample item.</p><p><img alt="" src="{_MOCK_EMBEDDED_IMAGE_URL}" /></p>'}}
         elif item_id == "456":
              return {"id": 456, "documentKey": "MOCK-2", "fields": {"name": "Another Mock Item", "description": "Details here."}}
         else:
@@ -166,17 +168,17 @@ class MockJamaClient:
                     {"id": 602, "name": "Run 2", "status": "FAILED"}]
         return []
 
-    def get_attachment(self, attachment_id: str):
-        logger.info(f"MOCK: get_attachment(attachment_id='{attachment_id}') called")
-        if attachment_id == "701":
-            return {"id": 701, "fields": {"name": "BCU_level_block.drawio.png", "description": "Mock diagram attachment"}}
-        return None
-
     def get_attachment_file(self, attachment_id: str) -> AttachmentFile:
         logger.info(f"MOCK: get_attachment_file(attachment_id='{attachment_id}') called")
         if attachment_id == "701":
             return AttachmentFile(content=_MOCK_PNG_BYTES, content_type="image/png", filename="BCU_level_block.drawio.png")
         raise ValueError(f"Mock Attachment file for ID {attachment_id} not found.")
+
+    def get_embedded_file(self, url: str) -> AttachmentFile:
+        logger.info(f"MOCK: get_embedded_file(url='{url}') called")
+        if url == _MOCK_EMBEDDED_IMAGE_URL:
+            return AttachmentFile(content=_MOCK_PNG_BYTES, content_type="image/png", filename="image-pasted.png")
+        raise ValueError(f"Mock embedded file at {url} not found.")
 
     def list_item_attachments(self, item_id: str) -> list[AttachmentInfo]:
         logger.info(f"MOCK: list_item_attachments(item_id='{item_id}') called")

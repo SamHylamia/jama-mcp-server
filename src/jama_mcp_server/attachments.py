@@ -8,12 +8,15 @@ too at `GET items/{itemId}/attachments`. We reach into JamaClient's private Core
 instance to issue those GETs directly, so we reuse its already-authenticated HTTP
 session instead of duplicating the OAuth flow.
 
-Note on IDs: the numeric ID embedded in an attachment's web UI URL (e.g. the
-`21627` in `https://<host>/attachment/21627/diagram.png`) is NOT the REST API
-attachment ID, it's served by a separate, browser-session-authenticated download
-endpoint with its own ID space (confirmed against a live Jamacloud instance: that
-URL's ID 404s against `GET attachments/{id}`). The REST attachment ID must be
-looked up per-item via `list_item_attachments`, matching by file name if needed.
+Note on files embedded in rich text: an item's rich-text fields reference files by
+URL, e.g. `<img src="https://<host>/attachment/21627/diagram.png">`. The numeric ID
+in that URL is NOT a REST API attachment ID (it 404s against `GET attachments/{id}`),
+and the file is often not an attachment of the item at all: an image pasted into the
+rich-text editor is stored as a standalone file that `GET items/{itemId}/attachments`
+doesn't list. Jama's REST API downloads these by URL instead, at `GET files?url=...`,
+which was confirmed against a live Jamacloud instance to serve both pasted images and
+real attachments referenced from rich text. `find_embedded_files` extracts those URLs
+from an item, and `get_embedded_file` downloads one.
 
 Note on Content-Type: `GET attachments/{id}/file` was observed (on a live Jamacloud
 instance) to always respond with `Content-Type: application/octet-stream` and no
@@ -24,7 +27,9 @@ falling back to sniffing the content's magic bytes for common image formats.
 
 import logging
 import re
+from html.parser import HTMLParser
 from typing import NamedTuple
+from urllib.parse import unquote, urljoin, urlparse
 
 from py_jama_rest_client.client import APIException, ResourceNotFoundException
 
@@ -45,6 +50,14 @@ class AttachmentFile(NamedTuple):
     content: bytes
     content_type: str
     filename: str | None
+
+
+class EmbeddedFile(NamedTuple):
+    field: str
+    url: str
+    file_name: str
+    kind: str  # "image" for an <img src>, "link" for an <a href>
+    alt: str | None
 
 
 class AttachmentInfo(NamedTuple):
@@ -143,30 +156,81 @@ def list_item_attachments(jama_client, item_id: str) -> list[AttachmentInfo]:
     return attachments
 
 
-def resolve_attachment_id(jama_client, item_id: str, file_name: str) -> str:
+def get_embedded_file(jama_client, url: str) -> AttachmentFile:
     """
-    Resolves an attachment's file name (e.g. from an item's <img> src, which is
-    the file name but not a usable ID - see the module docstring) to its REST API
-    attachment ID, by listing the item's attachments and matching by file name.
-    """
-    attachments = list_item_attachments(jama_client, item_id)
-    matches = [a for a in attachments if a.file_name == file_name]
+    Fetches a file referenced by URL from an item's rich-text field (an <img src> or
+    <a href> pointing at `/attachment/...`), whether it's a pasted image or a real
+    attachment. See the module docstring.
 
-    if not matches:
-        available = ", ".join(repr(a.file_name) for a in attachments) or "none"
-        raise ResourceNotFoundException(
-            f"No attachment named {file_name!r} found on item {item_id}. "
-            f"Attachments on this item: {available}",
-            status_code=404,
-        )
-    if len(matches) > 1:
-        ids = ", ".join(str(a.id) for a in matches)
-        raise APIException(
-            f"Item {item_id} has {len(matches)} attachments named {file_name!r} "
-            f"(ids: {ids}). Call get_jama_item_attachments and pass a specific "
-            f"attachment_id to disambiguate."
-        )
-    return str(matches[0].id)
+    Prefers a `get_embedded_file` method on the client itself (used by
+    MockJamaClient), falling back to a direct call through the real client's
+    private Core.
+    """
+    if hasattr(jama_client, "get_embedded_file"):
+        return jama_client.get_embedded_file(url)
+
+    core = _require_core(jama_client)
+
+    try:
+        response = core.get("files", params={"url": url})
+    except Exception as err:
+        raise APIException(str(err))
+
+    if response.status_code == 404:
+        raise ResourceNotFoundException(f"No Jama file found at {url}.", status_code=404)
+    response.raise_for_status()
+    content = response.content
+
+    content_type = (
+        _sniff_image_content_type(content)
+        or response.headers.get("Content-Type")
+        or "application/octet-stream"
+    )
+    filename = _filename_from_content_disposition(response.headers.get("Content-Disposition")) or _file_name_from_url(url)
+    return AttachmentFile(content=content, content_type=content_type, filename=filename)
+
+
+def find_embedded_files(item: dict, base_url: str | None = None) -> list[EmbeddedFile]:
+    """
+    Lists the Jama files referenced from an item's rich-text fields, in field order,
+    without duplicates. Relative URLs are resolved against base_url when given.
+    """
+    embedded: list[EmbeddedFile] = []
+    seen_urls: set[str] = set()
+    for field, value in (item.get("fields") or {}).items():
+        if not isinstance(value, str) or "/attachment/" not in value:
+            continue
+        parser = _AttachmentRefParser()
+        parser.feed(value)
+        for kind, url, alt in parser.refs:
+            if base_url:
+                url = urljoin(base_url.rstrip("/") + "/", url)
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            embedded.append(EmbeddedFile(field=field, url=url, file_name=_file_name_from_url(url), kind=kind, alt=alt))
+    return embedded
+
+
+class _AttachmentRefParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.refs: list[tuple[str, str, str | None]] = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "img":
+            kind, url = "image", attributes.get("src")
+        elif tag == "a":
+            kind, url = "link", attributes.get("href")
+        else:
+            return
+        if url and "/attachment/" in urlparse(url).path:
+            self.refs.append((kind, url, attributes.get("alt") or None))
+
+
+def _file_name_from_url(url: str) -> str:
+    return unquote(urlparse(url).path.rsplit("/", 1)[-1])
 
 
 def _require_core(jama_client):

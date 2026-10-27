@@ -1,14 +1,22 @@
 import base64
 import os
+from urllib.parse import urljoin
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 import logging
 
 from mcp.server.fastmcp import FastMCP, Context, Image
-from mcp.types import BlobResourceContents, EmbeddedResource
+from mcp.types import BlobResourceContents, CallToolResult, EmbeddedResource, TextContent
 from pydantic import AnyUrl
+import pydantic_core
 
-from .attachments import get_attachment_file, list_item_attachments, resolve_attachment_id
+from .attachments import (
+    AttachmentFile,
+    find_embedded_files,
+    get_attachment_file,
+    get_embedded_file,
+    list_item_attachments,
+)
 from .auth import get_jama_credentials, CredentialsError
 
 # Configure basic logging FIRST
@@ -107,27 +115,68 @@ async def get_jama_projects(ctx: Context) -> list[dict]:
     projects = jama_client.get_projects()
     return projects
 
+# Limits on images inlined by get_jama_item(include_images=True), so an item with
+# many or large screenshots doesn't flood the agent's context.
+MAX_INLINE_IMAGES = 10
+MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
+
 @mcp.tool()
-async def get_jama_item(item_id: str, ctx: Context) -> dict:
+async def get_jama_item(item_id: str, ctx: Context, include_images: bool = False) -> dict:
     """
     Retrieves details for a specific item from Jama Connect by its ID.
 
+    The returned item has an extra `embedded_files` list: every file its rich-text
+    fields reference (images pasted into or attached to the description, linked
+    files), each with `field`, `url`, `file_name`, `kind` ("image" or "link") and
+    `alt`. Pass those URLs to get_jama_attachment_content to fetch them, all in
+    one call. Pasted images are not attachments of the item, so
+    get_jama_item_attachments doesn't list them; use `embedded_files` instead.
+
     Args:
         item_id: The ID (as a string) of the Jama item to retrieve.
+        include_images: If true, also fetch the item's embedded images and return
+            them inline after the item, saving a get_jama_attachment_content call.
+            Leave false unless you need to see the images: they use a lot of
+            context. At most 10 images of up to 5 MB each are inlined; any others
+            are noted and can be fetched with get_jama_attachment_content.
 
     Returns:
-        A dictionary representing the item.
+        A dictionary representing the item, followed by its images if
+        include_images is true.
 
     Raises:
         APIException: If the item is not found or an error occurs.
     """
-    logger.info(f"Executing get_jama_item tool for item_id: {item_id}")
+    logger.info(f"Executing get_jama_item tool for item_id: {item_id}, include_images: {include_images}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
     item = jama_client.get_item(item_id)
     # Let the client raise ResourceNotFoundException if applicable
     if not item and MOCK_MODE: # Handle mock case explicitly if needed
         raise ValueError(f"Mock Item with ID {item_id} not found.")
-    return item
+    if not item:
+        return item
+
+    embedded_files = find_embedded_files(item, base_url=os.environ.get("JAMA_URL"))
+    item = {**item, "embedded_files": [f._asdict() for f in embedded_files]}
+    if not include_images:
+        return item
+
+    content = [TextContent(type="text", text=pydantic_core.to_json(item, indent=2).decode())]
+    for index, embedded in enumerate(f for f in embedded_files if f.kind == "image"):
+        if index >= MAX_INLINE_IMAGES:
+            content.append(_text(f"Not inlined (over the {MAX_INLINE_IMAGES}-image limit): {embedded.url}"))
+            continue
+        try:
+            file = get_embedded_file(jama_client, embedded.url)
+        except Exception as err:
+            content.append(_text(f"Failed to fetch {embedded.url}: {err}"))
+            continue
+        if len(file.content) > MAX_INLINE_IMAGE_BYTES:
+            content.append(_text(f"Not inlined (larger than {MAX_INLINE_IMAGE_BYTES} bytes): {embedded.url}"))
+            continue
+        content.append(_text(f"Image from {embedded.field}: {embedded.url}"))
+        content.extend(_file_content(file, embedded.url))
+    return CallToolResult(content=content, structuredContent=item)
 
 @mcp.tool()
 async def get_jama_project_items(project_id: str, ctx: Context) -> list[dict]:
@@ -288,16 +337,13 @@ async def get_jama_item_downstream_related(item_id: str, ctx: Context) -> list[d
 async def get_jama_item_attachments(item_id: str, ctx: Context) -> list[dict]:
     """
     Lists the attachments associated with a Jama item: their REST API IDs, file
-    names, MIME types, and sizes. Useful for browsing what's attached to an item,
-    or to disambiguate when get_jama_attachment_content's item_id/file_name lookup
-    fails because more than one attachment shares that file name.
+    names, MIME types, and sizes. Pass the IDs to get_jama_attachment_content's
+    attachment_ids to fetch the files.
 
-    Note: the numeric ID embedded in an attachment's web UI URL (e.g. the `21627`
-    in `https://<host>/attachment/21627/diagram.png`) is a different ID space from
-    the REST attachment ID returned here - that URL is served by a separate,
-    browser-session-authenticated endpoint. It's the file name from that URL,
-    together with the item's ID, that identifies the attachment for this tool
-    and for get_jama_attachment_content.
+    Images pasted into an item's rich text are not attachments and are not listed
+    here. For files referenced from rich text, use the `embedded_files` URLs from
+    get_jama_item instead. The number in such a URL (e.g. the `21627` in
+    `https://<host>/attachment/21627/diagram.png`) is not a REST attachment ID.
 
     Args:
         item_id: The ID (as a string) of the Jama item.
@@ -315,93 +361,83 @@ async def get_jama_item_attachments(item_id: str, ctx: Context) -> list[dict]:
     return [a._asdict() for a in attachments]
 
 @mcp.tool()
-async def get_jama_attachment(attachment_id: str, ctx: Context) -> dict:
-    """
-    Retrieves metadata for a specific Jama attachment by its ID (name, description,
-    etc.). To retrieve the attachment's actual file content (e.g. an image embedded
-    in an item's rich-text description), use get_jama_attachment_content instead.
-
-    Args:
-        attachment_id: The ID (as a string) of the Jama attachment, as returned by
-            get_jama_item_attachments (its `id` field).
-
-    Returns:
-        A dictionary representing the attachment.
-
-    Raises:
-        APIException: If the attachment is not found or an error occurs.
-    """
-    logger.info(f"Executing get_jama_attachment tool for attachment_id: {attachment_id}")
-    jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
-    attachment = jama_client.get_attachment(attachment_id)
-    if not attachment and MOCK_MODE:
-        raise ValueError(f"Mock Attachment with ID {attachment_id} not found.")
-    return attachment
-
-@mcp.tool()
 async def get_jama_attachment_content(
     ctx: Context,
-    attachment_id: str | None = None,
-    item_id: str | None = None,
-    file_name: str | None = None,
+    urls: list[str] | None = None,
+    attachment_ids: list[str] | None = None,
 ):
     """
-    Retrieves the file content of a Jama attachment, e.g. an image embedded via an
-    <img> tag in an item's rich-text description field.
+    Retrieves the file content of one or more Jama files in a single call, e.g. the
+    images in an item's rich-text description.
 
-    Identify the attachment with EITHER:
-    - attachment_id: its REST API ID, as returned by get_jama_item_attachments; or
-    - item_id and file_name together: the ID of the item the attachment belongs to
-      plus its file name (e.g. the text after the last `/` in an <img> src). This
-      resolves the ID internally (equivalent to calling get_jama_item_attachments
-      and matching by file name), saving a separate call in the common case where
-      you already know both from having just read the item. It fails if the item
-      has more than one attachment with that file name - call
-      get_jama_item_attachments yourself and pass a specific attachment_id in
-      that case.
+    Identify the files with either or both of:
+    - urls: URLs of files referenced from an item's rich-text fields, as listed in
+      get_jama_item's `embedded_files` (or an <img src> / <a href> pointing at
+      `https://<host>/attachment/...`). This works for images pasted into rich text
+      as well as attachments referenced from it. Pass all the files you need at
+      once rather than calling this tool once per file.
+    - attachment_ids: REST API attachment IDs, as returned by
+      get_jama_item_attachments, for attachments not referenced from rich text.
+      The number in an `/attachment/<n>/...` URL is not an attachment ID.
 
     Args:
-        attachment_id: The REST API ID of the attachment. Optional if item_id and
-            file_name are given instead.
-        item_id: The ID of the item the attachment belongs to. Used with file_name.
-        file_name: The attachment's file name. Used with item_id.
+        urls: URLs of files referenced from rich text.
+        attachment_ids: REST API IDs of attachments.
 
     Returns:
-        An inline image for image attachments (e.g. PNG, JPEG). For any other
-        attachment type, an embedded resource containing the base64-encoded file
-        content and its MIME type.
+        For each file, a text line naming it, followed by the file: an inline image
+        for image files (e.g. PNG, JPEG), otherwise an embedded resource containing
+        the base64-encoded content and its MIME type. A file that can't be fetched
+        gets a text line with the error instead, without failing the others.
 
     Raises:
-        ValueError: If neither attachment_id nor (item_id and file_name) are given.
-        ResourceNotFoundException: If the attachment or its file is not found.
-        APIException: If an error occurs during the Jama API call, or file_name
-            matches more than one attachment on the item.
+        ValueError: If neither urls nor attachment_ids are given.
     """
-    logger.info(
-        f"Executing get_jama_attachment_content tool for attachment_id={attachment_id}, "
-        f"item_id={item_id}, file_name={file_name}"
-    )
+    logger.info(f"Executing get_jama_attachment_content tool for urls={urls}, attachment_ids={attachment_ids}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
 
-    if attachment_id is None:
-        if not item_id or not file_name:
-            raise ValueError("Provide either attachment_id, or both item_id and file_name.")
-        attachment_id = resolve_attachment_id(jama_client, item_id, file_name)
+    if not urls and not attachment_ids:
+        raise ValueError("Provide urls and/or attachment_ids.")
 
-    attachment_file = get_attachment_file(jama_client, attachment_id)
+    content = []
+    base_url = os.environ.get("JAMA_URL")
+    for url in urls or []:
+        if base_url:
+            url = urljoin(base_url.rstrip("/") + "/", url)
+        _append_fetched(content, url, lambda: get_embedded_file(jama_client, url))
+    for attachment_id in attachment_ids or []:
+        uri = f"jama://attachments/{attachment_id}/file"
+        _append_fetched(content, uri, lambda: get_attachment_file(jama_client, attachment_id))
+    return content
 
-    if attachment_file.content_type.startswith("image/"):
-        image_format = attachment_file.content_type.split("/", 1)[1].split(";")[0]
-        return Image(data=attachment_file.content, format=image_format)
+def _append_fetched(content: list, uri: str, fetch) -> None:
+    """Appends a fetched file, preceded by a line naming it, or a line with the fetch error."""
+    try:
+        file = fetch()
+    except Exception as err:
+        content.append(_text(f"Failed to fetch {uri}: {err}"))
+        return
+    content.append(_text(f"{file.filename or uri} ({file.content_type}, {len(file.content)} bytes): {uri}"))
+    content.extend(_file_content(file, uri))
 
-    return EmbeddedResource(
-        type="resource",
-        resource=BlobResourceContents(
-            uri=AnyUrl(f"jama://attachments/{attachment_id}/file"),
-            mimeType=attachment_file.content_type,
-            blob=base64.b64encode(attachment_file.content).decode("ascii"),
-        ),
-    )
+def _text(text: str) -> TextContent:
+    return TextContent(type="text", text=text)
+
+def _file_content(file: AttachmentFile, uri: str) -> list:
+    """Converts a fetched file to MCP content: an inline image, or a base64 embedded resource."""
+    if file.content_type.startswith("image/"):
+        image_format = file.content_type.split("/", 1)[1].split(";")[0]
+        return [Image(data=file.content, format=image_format).to_image_content()]
+    return [
+        EmbeddedResource(
+            type="resource",
+            resource=BlobResourceContents(
+                uri=AnyUrl(uri),
+                mimeType=file.content_type,
+                blob=base64.b64encode(file.content).decode("ascii"),
+            ),
+        )
+    ]
 
 @mcp.tool()
 async def get_jama_item_types(ctx: Context) -> list[dict]:

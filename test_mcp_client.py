@@ -107,11 +107,15 @@ async def main():
                 # Example: Get Item Attachments (resolves item 123's attachment to ID 701)
                 await run_test("get_item_attachments_123", "get_jama_item_attachments", arguments={"item_id": "123"})
 
-                # Example: Get Attachment Metadata (ID 701)
-                await run_test("get_attachment_701", "get_jama_attachment", arguments={"attachment_id": "701"})
+                # Example: Get Attachment Content (ID 701 plus item 123's pasted image, mock PNGs)
+                await run_test(
+                    "get_attachment_content_701_and_url",
+                    "get_jama_attachment_content",
+                    arguments={"attachment_ids": ["701"], "urls": ["https://mock.jama.local/attachment/22129/image-pasted.png"]},
+                )
 
-                # Example: Get Attachment Content (ID 701, mock PNG)
-                await run_test("get_attachment_content_701", "get_jama_attachment_content", arguments={"attachment_id": "701"})
+                # Example: Get Item with its embedded images inlined (item 123)
+                await run_test("get_item_123_with_images", "get_jama_item", arguments={"item_id": "123", "include_images": True})
 
 
                 # --- Print Summary ---

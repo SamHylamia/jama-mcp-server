@@ -7,7 +7,6 @@ from jama_mcp_server.server import (
     get_jama_projects,
     get_jama_item,
     get_jama_project_items,
-    get_jama_attachment,
     get_jama_attachment_content,
     get_jama_item_attachments,
 )
@@ -82,7 +81,7 @@ async def test_get_jama_item_success(mock_context, mock_jama_client):
     result = await get_jama_item(item_id=item_id_to_test, ctx=mock_context)
 
     # Assert
-    assert result == mock_item_data
+    assert result == {**mock_item_data, "embedded_files": []}
     mock_jama_client.get_item.assert_called_once_with(item_id_to_test)
 
 @pytest.mark.asyncio
@@ -178,119 +177,133 @@ async def test_get_jama_item_attachments_success(mock_context, mock_jama_client)
     mock_jama_client.list_item_attachments.assert_called_once_with(item_id_to_test)
 
 
-# --- Tool Tests for get_jama_attachment ---
+# --- Tool Tests for get_jama_item embedded files ---
+
+PASTED_IMAGE_URL = "https://example.jamacloud.com/attachment/22129/image-anEE2T6Ebh.png"
+LINKED_PDF_URL = "https://example.jamacloud.com/attachment/22130/spec%20v2.pdf"
+ITEM_WITH_EMBEDDED_FILES = {
+    "id": 319839,
+    "fields": {
+        "name": "Voltage monitoring",
+        "description": (
+            '<p><a href="https://example.jamacloud.com/perspective.req?docId=1&amp;projectId=50">other item</a></p>'
+            f'<p><img alt="block diagram" height="301" src="{PASTED_IMAGE_URL}" width="373" /></p>'
+            f'<p><a href="{LINKED_PDF_URL}">spec</a></p>'
+        ),
+        "rationale$123": f'<img src="{PASTED_IMAGE_URL}" />',
+    },
+}
+
 
 @pytest.mark.asyncio
-async def test_get_jama_attachment_success(mock_context, mock_jama_client):
-    """Test get_jama_attachment returns metadata from mock client."""
-    attachment_id_to_test = "701"
-    mock_attachment_data = {"id": 701, "fields": {"name": "diagram.png"}}
-    mock_jama_client.get_attachment.return_value = mock_attachment_data
+async def test_get_jama_item_lists_embedded_files(mock_context, mock_jama_client):
+    """Test get_jama_item lists rich-text file references, skipping non-attachment links and duplicates."""
+    mock_jama_client.get_item.return_value = ITEM_WITH_EMBEDDED_FILES
 
-    result = await get_jama_attachment(attachment_id=attachment_id_to_test, ctx=mock_context)
+    result = await get_jama_item(item_id="319839", ctx=mock_context)
 
-    assert result == mock_attachment_data
-    mock_jama_client.get_attachment.assert_called_once_with(attachment_id_to_test)
+    assert result["embedded_files"] == [
+        {"field": "description", "url": PASTED_IMAGE_URL, "file_name": "image-anEE2T6Ebh.png", "kind": "image", "alt": "block diagram"},
+        {"field": "description", "url": LINKED_PDF_URL, "file_name": "spec v2.pdf", "kind": "link", "alt": None},
+    ]
+    mock_jama_client.get_embedded_file.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_jama_item_resolves_relative_urls(mock_context, mock_jama_client, monkeypatch):
+    """Test get_jama_item resolves relative rich-text URLs against JAMA_URL."""
+    monkeypatch.setenv("JAMA_URL", "https://example.jamacloud.com")
+    mock_jama_client.get_item.return_value = {"id": 1, "fields": {"description": '<img src="/attachment/5/a.png" />'}}
+
+    result = await get_jama_item(item_id="1", ctx=mock_context)
+
+    assert result["embedded_files"][0]["url"] == "https://example.jamacloud.com/attachment/5/a.png"
+
+
+@pytest.mark.asyncio
+async def test_get_jama_item_include_images_inlines_images_only(mock_context, mock_jama_client):
+    """Test get_jama_item(include_images=True) returns the item plus its images, but not linked files."""
+    from mcp.types import CallToolResult, ImageContent
+
+    mock_jama_client.get_item.return_value = ITEM_WITH_EMBEDDED_FILES
+    mock_jama_client.get_embedded_file.return_value = AttachmentFile(
+        content=b"\x89PNG\r\n\x1a\nfakepngbytes", content_type="image/png", filename="image-anEE2T6Ebh.png"
+    )
+
+    result = await get_jama_item(item_id="319839", ctx=mock_context, include_images=True)
+
+    assert isinstance(result, CallToolResult)
+    assert result.structuredContent["embedded_files"][0]["url"] == PASTED_IMAGE_URL
+    assert [type(c).__name__ for c in result.content] == ["TextContent", "TextContent", "ImageContent"]
+    assert isinstance(result.content[2], ImageContent)
+    mock_jama_client.get_embedded_file.assert_called_once_with(PASTED_IMAGE_URL)
+
+
+@pytest.mark.asyncio
+async def test_get_jama_item_include_images_caps_count(mock_context, mock_jama_client, monkeypatch):
+    """Test get_jama_item(include_images=True) notes images beyond the limit instead of fetching them."""
+    from jama_mcp_server import server
+
+    monkeypatch.setattr(server, "MAX_INLINE_IMAGES", 1)
+    mock_jama_client.get_item.return_value = {
+        "id": 1,
+        "fields": {"description": '<img src="https://h/attachment/1/a.png" /><img src="https://h/attachment/2/b.png" />'},
+    }
+    mock_jama_client.get_embedded_file.return_value = AttachmentFile(
+        content=b"\x89PNG\r\n\x1a\n", content_type="image/png", filename="a.png"
+    )
+
+    result = await get_jama_item(item_id="1", ctx=mock_context, include_images=True)
+
+    assert "over the 1-image limit" in result.content[-1].text
+    mock_jama_client.get_embedded_file.assert_called_once_with("https://h/attachment/1/a.png")
 
 
 # --- Tool Tests for get_jama_attachment_content ---
 
 @pytest.mark.asyncio
-async def test_get_jama_attachment_content_image_returns_image_content(mock_context, mock_jama_client):
-    """Test get_jama_attachment_content returns MCP ImageContent for an image attachment."""
+async def test_get_jama_attachment_content_fetches_urls_and_ids_in_one_call(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content returns every requested file, each preceded by a label."""
+    from mcp.types import BlobResourceContents, EmbeddedResource, ImageContent, TextContent
+
+    mock_jama_client.get_embedded_file.return_value = AttachmentFile(
+        content=b"\x89PNG\r\n\x1a\nfakepngbytes", content_type="image/png", filename="image-anEE2T6Ebh.png"
+    )
+    mock_jama_client.get_attachment_file.return_value = AttachmentFile(
+        content=b"%PDF-1.4 fake pdf bytes", content_type="application/pdf", filename="spec.pdf"
+    )
+
+    result = await get_jama_attachment_content(urls=[PASTED_IMAGE_URL], attachment_ids=["702"], ctx=mock_context)
+
+    assert [type(c) for c in result] == [TextContent, ImageContent, TextContent, EmbeddedResource]
+    assert result[1].mimeType == "image/png"
+    assert isinstance(result[3].resource, BlobResourceContents)
+    assert result[3].resource.mimeType == "application/pdf"
+    assert "spec.pdf" in result[2].text
+    mock_jama_client.get_embedded_file.assert_called_once_with(PASTED_IMAGE_URL)
+    mock_jama_client.get_attachment_file.assert_called_once_with("702")
+
+
+@pytest.mark.asyncio
+async def test_get_jama_attachment_content_reports_failures_without_failing_others(mock_context, mock_jama_client):
+    """Test a file that can't be fetched becomes an error line, and the rest are still returned."""
     from mcp.types import ImageContent
 
-    attachment_id_to_test = "701"
-    mock_jama_client.get_attachment_file.return_value = AttachmentFile(
-        content=b"\x89PNG\r\n\x1a\nfakepngbytes",
-        content_type="image/png",
-        filename="diagram.png",
-    )
-
-    result = await get_jama_attachment_content(attachment_id=attachment_id_to_test, ctx=mock_context)
-
-    image_content = result.to_image_content()
-    assert isinstance(image_content, ImageContent)
-    assert image_content.mimeType == "image/png"
-    mock_jama_client.get_attachment_file.assert_called_once_with(attachment_id_to_test)
-
-
-@pytest.mark.asyncio
-async def test_get_jama_attachment_content_non_image_returns_embedded_resource(mock_context, mock_jama_client):
-    """Test get_jama_attachment_content returns an EmbeddedResource for non-image attachments."""
-    from mcp.types import BlobResourceContents, EmbeddedResource
-
-    attachment_id_to_test = "702"
-    mock_jama_client.get_attachment_file.return_value = AttachmentFile(
-        content=b"%PDF-1.4 fake pdf bytes",
-        content_type="application/pdf",
-        filename="spec.pdf",
-    )
-
-    result = await get_jama_attachment_content(attachment_id=attachment_id_to_test, ctx=mock_context)
-
-    assert isinstance(result, EmbeddedResource)
-    assert isinstance(result.resource, BlobResourceContents)
-    assert result.resource.mimeType == "application/pdf"
-    mock_jama_client.get_attachment_file.assert_called_once_with(attachment_id_to_test)
-
-
-@pytest.mark.asyncio
-async def test_get_jama_attachment_content_not_found_propagates(mock_context, mock_jama_client):
-    """Test get_jama_attachment_content propagates a not-found error from the client."""
-    attachment_id_to_test = "999"
-    mock_jama_client.get_attachment_file.side_effect = ValueError("Attachment not found")
-
-    with pytest.raises(ValueError, match="Attachment not found"):
-        await get_jama_attachment_content(attachment_id=attachment_id_to_test, ctx=mock_context)
-
-
-@pytest.mark.asyncio
-async def test_get_jama_attachment_content_resolves_via_item_id_and_file_name(mock_context, mock_jama_client):
-    """Test get_jama_attachment_content resolves the id itself when given item_id + file_name."""
-    from jama_mcp_server.attachments import AttachmentInfo
-
-    mock_jama_client.list_item_attachments.return_value = [
-        AttachmentInfo(id=315628, file_name="diagram.png", mime_type="image/png", file_size=151783)
+    mock_jama_client.get_embedded_file.side_effect = [
+        ValueError("not found"),
+        AttachmentFile(content=b"\x89PNG\r\n\x1a\n", content_type="image/png", filename="b.png"),
     ]
-    mock_jama_client.get_attachment_file.return_value = AttachmentFile(
-        content=b"\x89PNG\r\n\x1a\nfakepngbytes",
-        content_type="image/png",
-        filename="diagram.png",
+
+    result = await get_jama_attachment_content(
+        urls=["https://h/attachment/1/a.png", "https://h/attachment/2/b.png"], ctx=mock_context
     )
 
-    result = await get_jama_attachment_content(item_id="140309", file_name="diagram.png", ctx=mock_context)
-
-    result.to_image_content()  # doesn't raise
-    mock_jama_client.list_item_attachments.assert_called_once_with("140309")
-    mock_jama_client.get_attachment_file.assert_called_once_with("315628")
+    assert "Failed to fetch https://h/attachment/1/a.png: not found" in result[0].text
+    assert isinstance(result[2], ImageContent)
 
 
 @pytest.mark.asyncio
-async def test_get_jama_attachment_content_requires_id_or_item_and_filename(mock_context, mock_jama_client):
-    """Test get_jama_attachment_content rejects a call with none of its identifying args."""
-    with pytest.raises(ValueError, match="Provide either attachment_id"):
+async def test_get_jama_attachment_content_requires_urls_or_ids(mock_context, mock_jama_client):
+    """Test get_jama_attachment_content rejects a call with nothing to fetch."""
+    with pytest.raises(ValueError, match="Provide urls and/or attachment_ids"):
         await get_jama_attachment_content(ctx=mock_context)
-
-
-@pytest.mark.asyncio
-async def test_get_jama_attachment_content_file_name_not_found(mock_context, mock_jama_client):
-    """Test get_jama_attachment_content raises when no attachment matches file_name."""
-    mock_jama_client.list_item_attachments.return_value = []
-
-    with pytest.raises(Exception, match="No attachment named"):
-        await get_jama_attachment_content(item_id="140309", file_name="missing.png", ctx=mock_context)
-
-
-@pytest.mark.asyncio
-async def test_get_jama_attachment_content_file_name_ambiguous(mock_context, mock_jama_client):
-    """Test get_jama_attachment_content raises when file_name matches more than one attachment."""
-    from jama_mcp_server.attachments import AttachmentInfo
-
-    mock_jama_client.list_item_attachments.return_value = [
-        AttachmentInfo(id=175819, file_name="Protective state.txt", mime_type="text/plain", file_size=1321),
-        AttachmentInfo(id=211114, file_name="Protective state.txt", mime_type="text/plain", file_size=1321),
-    ]
-
-    with pytest.raises(Exception, match="2 attachments named"):
-        await get_jama_attachment_content(item_id="103", file_name="Protective state.txt", ctx=mock_context)
