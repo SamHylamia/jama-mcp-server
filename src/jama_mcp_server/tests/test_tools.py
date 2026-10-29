@@ -113,6 +113,38 @@ async def test_get_jama_item_error(mock_context, mock_jama_client):
     mock_jama_client.get_item.assert_called_once_with(item_id_to_test)
 
 
+@pytest.mark.asyncio
+async def test_get_jama_item_by_document_key(mock_context, mock_jama_client):
+    """Test get_jama_item looks up a documentKey and fetches the matching item."""
+    mock_jama_client.get_abstract_items.return_value = [{"id": 123, "documentKey": "ABC-REQ-12", "type": "items"}]
+    mock_jama_client.get_item.return_value = {"id": 123, "fields": {}}
+
+    result = await get_jama_item(item_id="abc-req-12", ctx=mock_context)
+
+    assert result["id"] == 123
+    mock_jama_client.get_abstract_items.assert_called_once_with(document_key=["abc-req-12"])
+    mock_jama_client.get_item.assert_called_once_with("123")
+
+@pytest.mark.asyncio
+async def test_get_jama_item_unknown_document_key(mock_context, mock_jama_client):
+    """Test get_jama_item raises when only a non-item (e.g. an attachment) has the documentKey."""
+    mock_jama_client.get_abstract_items.return_value = [{"id": 5, "documentKey": "ABC-REQ-99", "type": "attachments"}]
+
+    with pytest.raises(ValueError, match="No Jama item with ID or documentKey 'ABC-REQ-99'"):
+        await get_jama_item(item_id="ABC-REQ-99", ctx=mock_context)
+    mock_jama_client.get_item.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_get_jama_item_attachments_by_document_key(mock_context, mock_jama_client):
+    """Test item tools other than get_jama_item also accept a documentKey."""
+    mock_jama_client.get_abstract_items.return_value = [{"id": 140309, "documentKey": "ABC-REQ-12", "type": "items"}]
+    mock_jama_client.list_item_attachments.return_value = []
+
+    await get_jama_item_attachments(item_id="ABC-REQ-12", ctx=mock_context)
+
+    mock_jama_client.list_item_attachments.assert_called_once_with("140309")
+
+
 # --- Tool Tests for get_jama_project_items ---
 
 @pytest.mark.asyncio

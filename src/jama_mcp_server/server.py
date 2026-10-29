@@ -4,10 +4,11 @@ from urllib.parse import urljoin
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 import logging
+from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP, Context, Image
 from mcp.types import BlobResourceContents, CallToolResult, EmbeddedResource, TextContent
-from pydantic import AnyUrl
+from pydantic import AnyUrl, Field
 import pydantic_core
 
 from .attachments import (
@@ -98,6 +99,26 @@ mcp = FastMCP(
 
 # --- Tool Implementations ---
 
+ItemId = Annotated[str, Field(description='Numeric item ID or documentKey (e.g. "ABC-REQ-12").')]
+
+def _resolve_item_id(jama_client, item_id: str) -> str:
+    """
+    Returns the numeric API ID for `item_id`, which may be a numeric ID or a
+    documentKey (e.g. "ABC-REQ-12"). Document keys are looked up via
+    `GET abstractitems?documentKey=`, which matches case-insensitively and also
+    returns attachments, test plans etc.; only items (`type == "items"`) count.
+    """
+    item_id = item_id.strip()
+    if item_id.isdigit():
+        return item_id
+    matches = [
+        item for item in jama_client.get_abstract_items(document_key=[item_id]) or []
+        if item.get("type") == "items" and str(item.get("documentKey", "")).lower() == item_id.lower()
+    ]
+    if not matches:
+        raise ValueError(f"No Jama item with ID or documentKey '{item_id}'.")
+    return str(matches[0]["id"])
+
 @mcp.tool()
 async def get_jama_projects(ctx: Context) -> list[dict]:
     """
@@ -115,9 +136,9 @@ MAX_INLINE_IMAGES = 10
 MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
 
 @mcp.tool()
-async def get_jama_item(item_id: str, ctx: Context, include_images: bool = False) -> dict:
+async def get_jama_item(item_id: ItemId, ctx: Context, include_images: bool = False) -> dict:
     """
-    Gets a Jama item by its numeric ID (not its documentKey like "ABC-REQ-12").
+    Gets a Jama item by its numeric ID or documentKey (e.g. "ABC-REQ-12").
 
     Rich-text fields (e.g. `description`) are HTML; links like
     `perspective.req?docId=<n>` point to item <n>. Custom field keys end in
@@ -134,6 +155,7 @@ async def get_jama_item(item_id: str, ctx: Context, include_images: bool = False
     """
     logger.info(f"Executing get_jama_item tool for item_id: {item_id}, include_images: {include_images}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
     item = jama_client.get_item(item_id)
     # Let the client raise ResourceNotFoundException if applicable
     if not item and MOCK_MODE: # Handle mock case explicitly if needed
@@ -175,12 +197,13 @@ async def get_jama_project_items(project_id: str, ctx: Context) -> list[dict]:
     return items if items else []
 
 @mcp.tool()
-async def get_jama_item_children(item_id: str, ctx: Context) -> list[dict]:
+async def get_jama_item_children(item_id: ItemId, ctx: Context) -> list[dict]:
     """
     Lists an item's direct children in the project tree.
     """
     logger.info(f"Executing get_jama_item_children tool for parent_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
     children = jama_client.get_item_children(item_id=item_id)
     return children if children else []
 
@@ -209,49 +232,53 @@ async def get_jama_relationship(relationship_id: str, ctx: Context) -> dict:
     return relationship
 
 @mcp.tool()
-async def get_jama_item_upstream_relationships(item_id: str, ctx: Context) -> list[dict]:
+async def get_jama_item_upstream_relationships(item_id: ItemId, ctx: Context) -> list[dict]:
     """
     Lists relationship records pointing into an item (`fromItem` is upstream). Use
     get_jama_item_upstream_related to get the items themselves.
     """
     logger.info(f"Executing get_jama_item_upstream_relationships tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
     relationships = jama_client.get_items_upstream_relationships(item_id=item_id)
     return relationships if relationships else []
 
 @mcp.tool()
-async def get_jama_item_downstream_relationships(item_id: str, ctx: Context) -> list[dict]:
+async def get_jama_item_downstream_relationships(item_id: ItemId, ctx: Context) -> list[dict]:
     """
     Lists relationship records going out from an item (`toItem` is downstream). Use
     get_jama_item_downstream_related to get the items themselves.
     """
     logger.info(f"Executing get_jama_item_downstream_relationships tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
     relationships = jama_client.get_items_downstream_relationships(item_id=item_id)
     return relationships if relationships else []
 
 @mcp.tool()
-async def get_jama_item_upstream_related(item_id: str, ctx: Context) -> list[dict]:
+async def get_jama_item_upstream_related(item_id: ItemId, ctx: Context) -> list[dict]:
     """
     Lists the items upstream of an item (e.g. the requirements it satisfies).
     """
     logger.info(f"Executing get_jama_item_upstream_related tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
     items = jama_client.get_items_upstream_related(item_id=item_id)
     return items if items else []
 
 @mcp.tool()
-async def get_jama_item_downstream_related(item_id: str, ctx: Context) -> list[dict]:
+async def get_jama_item_downstream_related(item_id: ItemId, ctx: Context) -> list[dict]:
     """
     Lists the items downstream of an item (e.g. those that satisfy or verify it).
     """
     logger.info(f"Executing get_jama_item_downstream_related tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
     items = jama_client.get_items_downstream_related(item_id=item_id)
     return items if items else []
 
 @mcp.tool()
-async def get_jama_item_attachments(item_id: str, ctx: Context) -> list[dict]:
+async def get_jama_item_attachments(item_id: ItemId, ctx: Context) -> list[dict]:
     """
     Lists files in an item's Attachments section: `id`, `file_name`, `mime_type`,
     `file_size`. Fetch them with get_jama_attachment_content(attachment_ids=[...]).
@@ -260,6 +287,7 @@ async def get_jama_item_attachments(item_id: str, ctx: Context) -> list[dict]:
     """
     logger.info(f"Executing get_jama_item_attachments tool for item_id: {item_id}")
     jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
     attachments = list_item_attachments(jama_client, item_id)
     return [a._asdict() for a in attachments]
 

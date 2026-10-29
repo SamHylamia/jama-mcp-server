@@ -35,6 +35,12 @@ class MockJamaClient:
             logger.warning(f"MOCK: Item ID {item_id} not found.")
             return None # Or raise an appropriate exception if the real client does
 
+    def get_abstract_items(self, document_key=None):
+        logger.info(f"MOCK: get_abstract_items(document_key={document_key}) called")
+        keys = {key.lower() for key in document_key or []}
+        items = [self.get_item("123"), self.get_item("456")]
+        return [{**item, "type": "items"} for item in items if item["documentKey"].lower() in keys]
+
     def get_available_endpoints(self):
          logger.info("MOCK: get_available_endpoints() called")
          # Return a structure similar to the real API if known, otherwise simple dict
