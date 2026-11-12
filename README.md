@@ -193,6 +193,8 @@ This server provides various read-only tools. See your MCP client interface for 
 
 To retrieve files referenced in an item's rich-text fields (e.g. an image pasted into a description, which Jama serves from a URL like `https://<host>/attachment/21627/diagram.png`), use the `embedded_files` list that `get_jama_item` adds to every item, and pass those URLs to `get_jama_attachment_content` (`urls` takes a list, so one call fetches them all). Alternatively, call `get_jama_item` with `include_images: true` to get the item and its embedded images in a single call (capped at 10 images of up to 5 MB each). Pasted images are not attachments of the item, so `get_jama_item_attachments` doesn't list them; it's for attachments not referenced from rich text, whose IDs go in `get_jama_attachment_content`'s `attachment_ids`. **Note:** the number in an `/attachment/<n>/...` URL is *not* a REST API attachment ID. Image files come back as inline images; other file types come back as an embedded resource with base64-encoded content.
 
+`get_jama_item_comments` returns an item's comments grouped into threads (each root comment with its `replies`), with author names resolved. Images in a comment body are listed in that comment's `embedded_files` and can be fetched the same way.
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

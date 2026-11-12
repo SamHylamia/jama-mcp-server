@@ -192,4 +192,19 @@ class MockJamaClient:
             return [AttachmentInfo(id=701, file_name="BCU_level_block.drawio.png", mime_type="image/png", file_size=len(_MOCK_PNG_BYTES))]
         return []
 
+    def list_item_comments(self, item_id: str) -> tuple[list[dict], dict]:
+        logger.info(f"MOCK: list_item_comments(item_id='{item_id}') called")
+        if item_id != "123":
+            return [], {}
+        comments = [
+            {"id": 901, "createdBy": 41, "createdDate": "2026-01-10T09:00:00.000+0000", "commentType": "GENERAL",
+             "status": "OPEN", "body": {"text": "<p>Is 5 V the right threshold?</p>"}, "location": {"item": 123}},
+            {"id": 902, "inReplyTo": 901, "createdBy": 42, "createdDate": "2026-01-11T10:00:00.000+0000",
+             "commentType": "GENERAL", "status": "OPEN", "body": {"text": "<p>Yes, per the datasheet.</p>"},
+             "location": {"item": 123}},
+        ]
+        users = {"41": {"id": 41, "firstName": "Alex", "lastName": "Mock"},
+                 "42": {"id": 42, "firstName": "Robin", "lastName": "Mock"}}
+        return comments, users
+
     # Add mock methods for other functions as needed

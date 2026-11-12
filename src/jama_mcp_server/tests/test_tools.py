@@ -9,6 +9,7 @@ from jama_mcp_server.server import (
     get_jama_project_items,
     get_jama_attachment_content,
     get_jama_item_attachments,
+    get_jama_item_comments,
 )
 
 # --- Test Fixtures ---
@@ -339,3 +340,47 @@ async def test_get_jama_attachment_content_requires_urls_or_ids(mock_context, mo
     """Test get_jama_attachment_content rejects a call with nothing to fetch."""
     with pytest.raises(ValueError, match="Provide urls and/or attachment_ids"):
         await get_jama_attachment_content(ctx=mock_context)
+
+
+# --- Tool Tests for get_jama_item_comments ---
+
+@pytest.mark.asyncio
+async def test_get_jama_item_comments_groups_threads(mock_context, mock_jama_client):
+    """Test replies (including replies to replies) nest under their root, oldest first, with author names."""
+    mock_jama_client.list_item_comments.return_value = (
+        [
+            {"id": 3, "inReplyTo": 2, "createdBy": 7, "createdDate": "2026-01-03", "body": {"text": "<p>c</p>"}},
+            {"id": 1, "createdBy": 7, "createdDate": "2026-01-01", "commentType": "GENERAL", "status": "OPEN",
+             "body": {"text": f'<p>a</p><img src="{PASTED_IMAGE_URL}" />'}},
+            {"id": 2, "inReplyTo": 1, "createdBy": 8, "createdDate": "2026-01-02", "body": {"text": "<p>b</p>"}},
+            {"id": 4, "createdBy": 8, "createdDate": "2026-01-04", "body": {"text": "<p>d</p>"}},
+            {"id": 5, "inReplyTo": 4, "createdBy": 8, "createdDate": "2026-01-05", "deleted": True, "body": {"text": "x"}},
+        ],
+        {"7": {"firstName": "Ada", "lastName": "L"}},
+    )
+
+    result = await get_jama_item_comments(item_id="123", ctx=mock_context)
+
+    assert [t["id"] for t in result] == [1, 4]
+    assert [r["id"] for r in result[0]["replies"]] == [2, 3]
+    assert result[0]["replies"][1]["in_reply_to"] == 2
+    assert result[1]["replies"] == []
+    assert result[0]["author"] == "Ada L"
+    assert result[0]["replies"][0]["author"] == "8"
+    assert result[0]["embedded_files"][0]["url"] == PASTED_IMAGE_URL
+    assert "embedded_files" not in result[1]
+    mock_jama_client.list_item_comments.assert_called_once_with("123")
+
+
+@pytest.mark.asyncio
+async def test_get_jama_item_comments_orphan_reply_becomes_root(mock_context, mock_jama_client):
+    """Test a reply whose parent isn't returned is shown as its own thread."""
+    mock_jama_client.list_item_comments.return_value = (
+        [{"id": 9, "inReplyTo": 99, "createdBy": 1, "createdDate": "2026-01-01", "body": {"text": "hi"}}],
+        {},
+    )
+
+    result = await get_jama_item_comments(item_id="123", ctx=mock_context)
+
+    assert [t["id"] for t in result] == [9]
+    assert result[0]["in_reply_to"] == 99

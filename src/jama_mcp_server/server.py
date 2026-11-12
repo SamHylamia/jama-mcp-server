@@ -19,6 +19,7 @@ from .attachments import (
     list_item_attachments,
 )
 from .auth import get_jama_credentials, CredentialsError
+from .comments import build_comment_threads, list_item_comments
 
 # Configure basic logging FIRST
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - SERVER - %(levelname)s - %(message)s')
@@ -290,6 +291,20 @@ async def get_jama_item_attachments(item_id: ItemId, ctx: Context) -> list[dict]
     item_id = _resolve_item_id(jama_client, item_id)
     attachments = list_item_attachments(jama_client, item_id)
     return [a._asdict() for a in attachments]
+
+@mcp.tool()
+async def get_jama_item_comments(item_id: ItemId, ctx: Context) -> list[dict]:
+    """
+    Lists the comments on an item as threads, oldest first. Each thread is a root
+    comment with `replies`; each comment has `id`, `author`, `created_date`,
+    `comment_type`, `status` and `body` (HTML). Images in a body are listed in its
+    `embedded_files`; fetch them with get_jama_attachment_content(urls=[...]).
+    """
+    logger.info(f"Executing get_jama_item_comments tool for item_id: {item_id}")
+    jama_client: JamaClient = ctx.request_context.lifespan_context["jama_client"]
+    item_id = _resolve_item_id(jama_client, item_id)
+    comments, users = list_item_comments(jama_client, item_id)
+    return build_comment_threads(comments, users, base_url=os.environ.get("JAMA_URL"))
 
 @mcp.tool()
 async def get_jama_attachment_content(
